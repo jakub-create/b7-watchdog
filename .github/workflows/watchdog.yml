@@ -1,0 +1,58 @@
+name: B7 marketplace watchdog
+
+on:
+  schedule:
+    # Každých 5 minut (minimum, které GitHub Actions dovolí). V praxi může mít
+    # cron menší zpoždění (i 10–15 min) podle vytížení GitHubu.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # umožní spustit ručně tlačítkem
+
+# Potřeba, aby workflow mohl commitnout aktualizovaný stav (state/seen.json).
+permissions:
+  contents: write
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run watchdog
+        env:
+          MODE: watch
+          B7_EMAIL: ${{ secrets.B7_EMAIL }}
+          B7_PASSWORD: ${{ secrets.B7_PASSWORD }}
+          B7_RACE_ID: ${{ vars.B7_RACE_ID }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ vars.MAIL_TO }}
+          MAIL_FROM: ${{ vars.MAIL_FROM }}
+        run: python watchdog.py
+
+      - name: Persist state
+        if: always()
+        run: |
+          if [[ -n "$(git status --porcelain state/)" ]]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add state/
+            git commit -m "Update watchdog state [skip ci]"
+            git push
+          else
+            echo "No state change."
+          fi
