@@ -61,12 +61,13 @@ LABEL_PASSWORD = "Heslo"
 LABEL_SUBMIT = "Přihlásit"
 
 # E-mail (SMTP) — works with Gmail, Seznam, etc.
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_HOST = os.environ.get("SMTP_HOST") or "smtp.gmail.com"
+SMTP_PORT = int(os.environ.get("SMTP_PORT") or "587")
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
-MAIL_TO = os.environ.get("MAIL_TO", SMTP_USER)
-MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USER)
+# If MAIL_TO/MAIL_FROM are unset (or blank), send from/to the SMTP account itself.
+MAIL_TO = os.environ.get("MAIL_TO") or SMTP_USER
+MAIL_FROM = os.environ.get("MAIL_FROM") or SMTP_USER
 
 STATE_FILE = Path(os.environ.get("STATE_FILE", "state/seen.json"))
 DEBUG_DIR = Path("debug")
