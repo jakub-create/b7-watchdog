@@ -5,7 +5,13 @@ on:
     # Každých 5 minut (minimum, které GitHub Actions dovolí). V praxi může mít
     # cron menší zpoždění (i 10–15 min) podle vytížení GitHubu.
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # umožní spustit ručně tlačítkem
+  workflow_dispatch:      # umožní spustit ručně tlačítkem
+    inputs:
+      mode:
+        description: "Režim běhu"
+        type: choice
+        default: watch
+        options: [watch, testmail, discovery]
 
 # Potřeba, aby workflow mohl commitnout aktualizovaný stav (state/seen.json).
 permissions:
@@ -32,7 +38,7 @@ jobs:
 
       - name: Run watchdog
         env:
-          MODE: watch
+          MODE: ${{ inputs.mode || 'watch' }}
           B7_EMAIL: ${{ secrets.B7_EMAIL }}
           B7_PASSWORD: ${{ secrets.B7_PASSWORD }}
           B7_RACE_ID: ${{ vars.B7_RACE_ID }}

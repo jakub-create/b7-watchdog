@@ -182,6 +182,15 @@ def fetch_offers() -> tuple[list[dict], dict]:
 # Main
 # ---------------------------------------------------------------------------
 def run() -> int:
+    if MODE == "testmail":
+        send_email(
+            "✅ Test – B7 ID hlídač funguje",
+            "Tohle je testovací zpráva z hlídače startovného.\n"
+            "Pokud ti dorazila, odesílání e-mailů je správně nastavené.\n\n"
+            f"Sleduji: {MARKETPLACE_URL}",
+        )
+        return 0
+
     offers, raw = fetch_offers()
     log(f"API returned {len(offers)} offer(s).")
 
