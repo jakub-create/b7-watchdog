@@ -58,7 +58,7 @@ Až příště přibude nová nabídka, dostaneš e-mail. Chceš-li vidět surov
    - `SMTP_HOST` (např. `smtp.gmail.com`), `SMTP_PORT` (`587`)
    - `MAIL_TO`, `MAIL_FROM`
 
-Hotovo. Workflow běží automaticky **každých 5 minut** (`.github/workflows/watchdog.yml`).
+Hotovo. Workflow běží automaticky **každých 30 minut** (`.github/workflows/watchdog.yml`).
 Ručně ho spustíš v **Actions → B7 marketplace watchdog → Run workflow**.
 
 ### Gmail App password

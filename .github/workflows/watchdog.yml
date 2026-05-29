@@ -2,9 +2,9 @@ name: B7 marketplace watchdog
 
 on:
   schedule:
-    # Každých 5 minut (minimum, které GitHub Actions dovolí). V praxi může mít
-    # cron menší zpoždění (i 10–15 min) podle vytížení GitHubu.
-    - cron: "*/5 * * * *"
+    # Každých 30 minut – šetrné k API, aby nehrozil ban. (GitHub cron může mít
+    # navíc pár minut zpoždění podle vytížení.)
+    - cron: "*/30 * * * *"
   workflow_dispatch:      # umožní spustit ručně tlačítkem
     inputs:
       mode:
