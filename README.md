@@ -60,16 +60,19 @@ Až příště přibude nová nabídka, dostaneš e-mail. Chceš-li vidět surov
 
 Ručně workflow spustíš v **Actions → B7 marketplace watchdog → Run workflow**.
 
-### Spolehlivé časování (proč ne obyčejný cron)
-GitHub naplánované běhy (cron) spouští nespolehlivě – pozorovali jsme mezery i 3–6 h.
-Proto hlídač běží jako **souvislá smyčka**: jedna úloha běží ~5,5 h a uvnitř kontroluje
-tržiště každých **5 minut** (`INTERVAL` ve `watchdog.yml`). Než jí vyprší čas, sama přes
-API nastartuje další běh (řetězení). Kdyby řetěz spadl, obnoví ho pojistka `keepalive.yml`.
+### Spolehlivé časování (externí časovač)
+GitHub naplánované běhy (cron) spouští nespolehlivě (mezery i 3–6 h) a nepřetržitá
+smyčka je proti smyslu jejich podmínek. Proto je workflow jen **krátký jednorázový běh**
+a spouští ho **externí časovač zdarma (cron-job.org)** přes GitHub API každých ~5 min:
 
-K řetězení je potřeba **Personal Access Token** uložený jako secret `DISPATCH_TOKEN`
-(fine-grained, oprávnění *Actions: Read and write* na tomto repu) – běžný `GITHUB_TOKEN`
-by kvůli ochraně proti rekurzi nový běh nespustil. Token má platnost max 1 rok, pak je
-třeba ho obnovit.
+- URL: `https://api.github.com/repos/<owner>/<repo>/actions/workflows/watchdog.yml/dispatches`
+- Metoda: `POST`, tělo: `{"ref":"main"}`
+- Hlavičky: `Authorization: Bearer <PAT>`, `Accept: application/vnd.github+json`,
+  `X-GitHub-Api-Version: 2022-11-28`
+
+PAT je fine-grained token s oprávněním *Actions: Read and write* na tomto repu
+(platnost max 1 rok – pak obnovit). `schedule` ve `watchdog.yml` (cca 4× denně) je jen
+záloha, kdyby externí časovač vypadl.
 
 ### Gmail App password
 Gmail nedovolí přihlášení běžným heslem. Zapni 2FA a vytvoř *App password*:
@@ -77,8 +80,8 @@ Google účet → Security → 2-Step Verification → App passwords. Ten 16mís
 do `SMTP_PASS`. (Seznam.cz apod. fungují obdobně, viz nastavení účtu.)
 
 ### Změna intervalu
-Ve `watchdog.yml` uprav proměnnou `INTERVAL` (v sekundách) v kroku *Watch loop*.
-Např. kontrola každé 2 minuty: `INTERVAL: "120"`.
+Interval se řídí v **cron-job.org** (jak často volá GitHub API). Nastav tam třeba
+každé 2 nebo 5 minut.
 
 ---
 
