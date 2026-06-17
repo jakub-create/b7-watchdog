@@ -98,13 +98,16 @@ def send_email(subject: str, body: str) -> None:
     log(f"E-mail sent to {MAIL_TO}: {subject}")
 
 
-def load_state() -> set:
+def load_state() -> set | None:
+    """Return the set of previously-seen offer ids, or None if we've never run
+    (state file missing / unreadable). None means "establish a silent baseline";
+    an empty set means "last poll legitimately had zero offers"."""
     if STATE_FILE.exists():
         try:
             return set(json.loads(STATE_FILE.read_text()))
         except Exception as e:  # noqa: BLE001
-            log(f"Could not read state ({e}); starting fresh.")
-    return set()
+            log(f"Could not read state ({e}); re-establishing baseline.")
+    return None
 
 
 def save_state(ids: set) -> None:
@@ -206,7 +209,11 @@ def run() -> int:
     current_ids = set(current)
     seen = load_state()
 
-    if not seen:
+    if seen is None:
+        # Truly the first run (no state file yet): record a silent baseline so we
+        # don't e-mail about offers that already exist. An EMPTY saved state is
+        # different — it means the last poll had zero offers, and a newly appearing
+        # offer must trigger an alert.
         save_state(current_ids)
         log(f"First run — baseline saved ({len(current_ids)} offer(s)), no alert sent.")
         return 0
