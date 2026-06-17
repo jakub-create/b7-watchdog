@@ -1,11 +1,12 @@
 name: B7 marketplace watchdog
 
+# Spolehlivý běh bez závislosti na (nespolehlivém) GitHub cronu:
+# jedna úloha běží souvisle ~5,5 h a uvnitř kontroluje tržiště každých INTERVAL
+# sekund. Než jí vyprší čas, sama nastartuje další běh (řetězení) -> nepřetržitý
+# provoz. Když by řetěz spadl, obnoví ho pojistka v keepalive.yml.
+
 on:
-  schedule:
-    # Každých 30 minut – šetrné k API, aby nehrozil ban. (GitHub cron může mít
-    # navíc pár minut zpoždění podle vytížení.)
-    - cron: "*/30 * * * *"
-  workflow_dispatch:      # umožní spustit ručně tlačítkem
+  workflow_dispatch:
     inputs:
       mode:
         description: "Režim běhu"
@@ -13,17 +14,17 @@ on:
         default: watch
         options: [watch, testmail, discovery]
 
-# Potřeba, aby workflow mohl commitnout aktualizovaný stav (state/seen.json).
 permissions:
-  contents: write
+  contents: write      # commit aktualizovaného stavu (state/seen.json)
 
 concurrency:
-  group: watchdog
+  group: watchdog      # nikdy neběží dvě smyčky najednou
   cancel-in-progress: false
 
 jobs:
   watch:
     runs-on: ubuntu-latest
+    timeout-minutes: 350      # < 6h hard limit GitHubu
     steps:
       - uses: actions/checkout@v4
 
@@ -36,9 +37,11 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run watchdog
+      - name: Watch loop
         env:
           MODE: ${{ inputs.mode || 'watch' }}
+          INTERVAL: "300"          # kontrola každých 5 minut
+          LOOP_BUDGET: "19800"     # 5,5 h, pak řetěz předá štafetu
           B7_EMAIL: ${{ secrets.B7_EMAIL }}
           B7_PASSWORD: ${{ secrets.B7_PASSWORD }}
           B7_RACE_ID: ${{ vars.B7_RACE_ID }}
@@ -48,17 +51,32 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ vars.MAIL_TO }}
           MAIL_FROM: ${{ vars.MAIL_FROM }}
-        run: python watchdog.py
-
-      - name: Persist state
-        if: always()
         run: |
-          if [[ -n "$(git status --porcelain state/)" ]]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add state/
-            git commit -m "Update watchdog state [skip ci]"
-            git push
-          else
-            echo "No state change."
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # testmail / discovery: jen jednou a konec (žádná smyčka).
+          if [ "$MODE" != "watch" ]; then
+            python watchdog.py
+            exit 0
           fi
+
+          end=$(( SECONDS + LOOP_BUDGET ))
+          while [ "$SECONDS" -lt "$end" ]; do
+            python watchdog.py || echo "watchdog.py selhalo, pokračuji dál"
+            if [ -n "$(git status --porcelain state/)" ]; then
+              git add state/
+              git commit -q -m "Update watchdog state [skip ci]"
+              git pull --rebase --autostash -q origin main || true
+              git push -q || echo "push selhal, zkusím příště"
+            fi
+            sleep "$INTERVAL"
+          done
+
+      # Štafeta: spustí další smyčku. Potřebuje PAT (DISPATCH_TOKEN) – běžný
+      # GITHUB_TOKEN by nový běh kvůli ochraně proti rekurzi nespustil.
+      - name: Chain next loop
+        if: always() && (inputs.mode == 'watch' || inputs.mode == '')
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: gh workflow run watchdog.yml --repo "${{ github.repository }}"

@@ -1,0 +1,33 @@
+name: Watchdog keepalive
+
+# Pojistka: kdyby řetěz hlavní smyčky (watchdog.yml) z jakéhokoli důvodu spadl,
+# tohle ho znovu nastartuje. Běží na cronu (best-effort, klidně s velkým zpožděním
+# – to nevadí, hlavní cadenci drží sama smyčka). Pokud smyčka už běží/čeká, nedělá
+# nic, takže se běhy nehromadí.
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"   # zhruba každé 2 hodiny
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  ensure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start loop if none is active
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          active=$(gh run list --repo "$REPO" --workflow watchdog.yml \
+            --json status \
+            -q '[.[] | select(.status=="in_progress" or .status=="queued")] | length')
+          if [ "${active:-0}" -gt 0 ]; then
+            echo "Smyčka už běží/čeká ($active) – nic nedělám."
+          else
+            echo "Žádná smyčka neběží – startuji."
+            gh workflow run watchdog.yml --repo "$REPO"
+          fi
