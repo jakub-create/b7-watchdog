@@ -58,8 +58,18 @@ Až příště přibude nová nabídka, dostaneš e-mail. Chceš-li vidět surov
    - `SMTP_HOST` (např. `smtp.gmail.com`), `SMTP_PORT` (`587`)
    - `MAIL_TO`, `MAIL_FROM`
 
-Hotovo. Workflow běží automaticky **každých 30 minut** (`.github/workflows/watchdog.yml`).
-Ručně ho spustíš v **Actions → B7 marketplace watchdog → Run workflow**.
+Ručně workflow spustíš v **Actions → B7 marketplace watchdog → Run workflow**.
+
+### Spolehlivé časování (proč ne obyčejný cron)
+GitHub naplánované běhy (cron) spouští nespolehlivě – pozorovali jsme mezery i 3–6 h.
+Proto hlídač běží jako **souvislá smyčka**: jedna úloha běží ~5,5 h a uvnitř kontroluje
+tržiště každých **5 minut** (`INTERVAL` ve `watchdog.yml`). Než jí vyprší čas, sama přes
+API nastartuje další běh (řetězení). Kdyby řetěz spadl, obnoví ho pojistka `keepalive.yml`.
+
+K řetězení je potřeba **Personal Access Token** uložený jako secret `DISPATCH_TOKEN`
+(fine-grained, oprávnění *Actions: Read and write* na tomto repu) – běžný `GITHUB_TOKEN`
+by kvůli ochraně proti rekurzi nový běh nespustil. Token má platnost max 1 rok, pak je
+třeba ho obnovit.
 
 ### Gmail App password
 Gmail nedovolí přihlášení běžným heslem. Zapni 2FA a vytvoř *App password*:
@@ -67,8 +77,8 @@ Google účet → Security → 2-Step Verification → App passwords. Ten 16mís
 do `SMTP_PASS`. (Seznam.cz apod. fungují obdobně, viz nastavení účtu.)
 
 ### Změna intervalu
-V `.github/workflows/watchdog.yml` uprav `cron`. Např. každých 15 min: `*/15 * * * *`.
-(Minimum, které GitHub dovolí, je 5 min; cron může mít při zátěži pár minut zpoždění.)
+Ve `watchdog.yml` uprav proměnnou `INTERVAL` (v sekundách) v kroku *Watch loop*.
+Např. kontrola každé 2 minuty: `INTERVAL: "120"`.
 
 ---
 
@@ -79,6 +89,6 @@ V `.github/workflows/watchdog.yml` uprav `cron`. Např. každých 15 min: `*/15 
   na tržišti je). Upozornění chodí až na nově přidané nabídky.
 
 ## Omezení
-- GitHub Actions cron má minimum 5 min a občas menší zpoždění. Pro „opravdu okamžitě"
-  (po 1 min) je řešením levný VPS se stejným skriptem v `cron`u.
+- Smyčka kontroluje po 5 min – velmi rychle prodaný lístek (do pár minut) může uniknout.
+  Lze zkrátit `INTERVAL`; API časté skenování samo vítá (vrací o tom poznámku).
 - Pokud b7id.cz přidá CAPTCHA / dvoufaktor, bude potřeba úprava přihlášení.
