@@ -197,26 +197,34 @@ def get_offers(context) -> tuple[list[dict], dict]:
     return offers, data
 
 
-def reserve_offer(context, offer) -> str:
-    """Place a 24h hold on an offer via the buyOffer endpoint.
+def reserve_offer(context, offer, csrf_token) -> tuple[bool, str]:
+    """Place a 24h hold on an offer via buyOffer.
 
-    WARNING: the exact request shape has NOT been confirmed against a real offer
-    yet. This best-effort guess is only ever invoked in RESERVE_MODE=live, which
-    must stay disabled until we observe one real reservation — to lock in the call
-    AND confirm it merely holds the slot (no charge). The full response is returned
-    so the real shape can be finalized.
+    Mirrors the b7id frontend exactly: POST market/buyOffer with body {"_id": id}
+    and the CSRF header (X-Csrf-Token) read from the logged-in session. A
+    successful response carries `gwUrl` — the payment-gateway link. We do NOT
+    follow it: buyOffer only reserves/holds the slot for 24 h; paying is a separate
+    step the user does manually. Returns (success, human message incl. pay link).
     """
     oid = offer.get("_id") or offer.get("id")
+    headers = {"content-type": "application/json"}
+    if csrf_token:
+        headers["X-Csrf-Token"] = csrf_token
     resp = context.request.post(
-        BUY_URL,
-        data=json.dumps({"offerId": oid}),
-        headers={"content-type": "application/json"},
-        timeout=30000,
+        BUY_URL, data=json.dumps({"_id": oid}), headers=headers, timeout=30000
     )
-    return f"HTTP {resp.status}: {resp.text()[:300]}"
+    gw = None
+    try:
+        j = resp.json()
+        gw = j.get("gwUrl") or (j.get("data") or {}).get("gwUrl")
+    except Exception:  # noqa: BLE001
+        pass
+    if gw:
+        return True, f"ZAREZERVOVÁNO ✅ — zaplať do 24 h zde: {gw}"
+    return False, f"NEúspěch (HTTP {resp.status}): {resp.text()[:300]}"
 
 
-def maybe_reserve(context, new_ids, current) -> list[str]:
+def maybe_reserve(context, new_ids, current, csrf_token) -> list[str]:
     """Auto-reserve qualifying new offers per RESERVE_MODE. Returns human notes."""
     if RESERVE_MODE not in ("dryrun", "live"):
         return []
@@ -233,8 +241,8 @@ def maybe_reserve(context, new_ids, current) -> list[str]:
             notes.append(f"  • {offer_label(o)} → NANEČISTO (rezervace by proběhla)")
         else:  # live
             try:
-                res = reserve_offer(context, o)
-                log(f"[LIVE] reserve {i}: {res}")
+                ok, res = reserve_offer(context, o, csrf_token)
+                log(f"[LIVE] reserve {i}: {'OK' if ok else 'FAIL'} {res}")
                 notes.append(f"  • {offer_label(o)} → {res}")
             except Exception as e:  # noqa: BLE001
                 log(f"[LIVE] reserve error {i}: {e}")
@@ -263,6 +271,10 @@ def run() -> int:
         page = context.new_page()
         try:
             do_login(page)
+            # CSRF token (needed to authorize state-changing POSTs like buyOffer).
+            csrf_token = page.evaluate(
+                "() => localStorage.getItem('session_csrf_token')"
+            )
             offers, raw = get_offers(context)
             log(f"API returned {len(offers)} offer(s).")
 
@@ -293,7 +305,7 @@ def run() -> int:
                 save_state(current_ids)
                 return 0
 
-            reserve_notes = maybe_reserve(context, new_ids, current)
+            reserve_notes = maybe_reserve(context, new_ids, current, csrf_token)
 
             lines = "\n".join(f"  • {offer_label(current[i])}" for i in new_ids)
             body = f"Na tržišti přibylo nové startovné ({len(new_ids)}):\n\n{lines}\n\n"
