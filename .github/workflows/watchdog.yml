@@ -46,6 +46,8 @@ jobs:
       - name: Run watchdog
         env:
           MODE: ${{ inputs.mode || 'watch' }}
+          RESERVE_MODE: dryrun          # dryrun = jen ukáže, co by zarezervovalo; "live" až po potvrzení
+          RESERVE_MAX_PRICE: "0"        # 0 = bez cenového stropu
           B7_EMAIL: ${{ secrets.B7_EMAIL }}
           B7_PASSWORD: ${{ secrets.B7_PASSWORD }}
           B7_RACE_ID: ${{ vars.B7_RACE_ID }}

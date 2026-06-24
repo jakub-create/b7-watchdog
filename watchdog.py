@@ -72,6 +72,19 @@ MAIL_FROM = os.environ.get("MAIL_FROM") or SMTP_USER
 STATE_FILE = Path(os.environ.get("STATE_FILE", "state/seen.json"))
 DEBUG_DIR = Path("debug")
 
+# --- Auto-reserve (optional) ---
+# RESERVE_MODE:
+#   "off"    – never reserve (default).
+#   "dryrun" – only log + e-mail what it WOULD reserve; does NOT call the API.
+#   "live"   – actually call buyOffer.
+# Keep this at "off"/"dryrun" until the buyOffer request has been confirmed on a
+# REAL offer to be a non-charging, cancellable 24h hold (the endpoint is literally
+# named "buyOffer", so we do not enable "live" on a guess).
+RESERVE_MODE = os.environ.get("RESERVE_MODE", "off").strip().lower()
+# Max buyerTotal (CZK) to auto-reserve; 0 = no limit.
+RESERVE_MAX_PRICE = int(os.environ.get("RESERVE_MAX_PRICE") or "0")
+BUY_URL = os.environ.get("B7_BUY_URL", "https://app-main-prod.b7id.cz/market/buyOffer")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -133,52 +146,100 @@ def offer_label(offer: dict) -> str:
         or offer.get("category")
         or offer.get("title")
     )
-    price = offer.get("price") or offer.get("amount") or offer.get("priceCzk")
+    price = (
+        offer.get("buyerTotal")
+        or offer.get("price")
+        or offer.get("askPrice")
+        or offer.get("amount")
+    )
+    size = (offer.get("slotIncludes") or {}).get("tshirtSize")
     parts = []
     if name:
         parts.append(str(name))
     if price is not None:
         parts.append(f"{price} Kč")
+    if size:
+        parts.append(f"triko {size}")
     if not parts:  # unknown shape — show the raw fields so nothing is lost
         parts.append(json.dumps(offer, ensure_ascii=False))
     return " — ".join(parts)
 
 
 # ---------------------------------------------------------------------------
-# Fetch offers (login via form, then call the JSON API in the same context)
+# Browser session helpers
 # ---------------------------------------------------------------------------
-def fetch_offers() -> tuple[list[dict], dict]:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
+def do_login(page) -> None:
+    log(f"Opening login page: {LOGIN_URL}")
+    page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+    email_field = page.locator(SEL_EMAIL) if SEL_EMAIL else page.get_by_label(LABEL_EMAIL)
+    pw_field = page.locator(SEL_PASSWORD) if SEL_PASSWORD else page.get_by_label(LABEL_PASSWORD)
+    submit = (
+        page.locator(SEL_SUBMIT)
+        if SEL_SUBMIT
+        else page.get_by_role("button", name=LABEL_SUBMIT)
+    )
+    email_field.fill(B7_EMAIL, timeout=15000)
+    pw_field.fill(B7_PASSWORD, timeout=15000)
+    submit.click(timeout=15000)
+    page.wait_for_load_state("networkidle", timeout=60000)
+    page.wait_for_timeout(2000)
+    log("Logged in.")
 
-        log(f"Opening login page: {LOGIN_URL}")
-        page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
-        email_field = page.locator(SEL_EMAIL) if SEL_EMAIL else page.get_by_label(LABEL_EMAIL)
-        pw_field = page.locator(SEL_PASSWORD) if SEL_PASSWORD else page.get_by_label(LABEL_PASSWORD)
-        submit = (
-            page.locator(SEL_SUBMIT)
-            if SEL_SUBMIT
-            else page.get_by_role("button", name=LABEL_SUBMIT)
-        )
-        email_field.fill(B7_EMAIL, timeout=15000)
-        pw_field.fill(B7_PASSWORD, timeout=15000)
-        submit.click(timeout=15000)
-        page.wait_for_load_state("networkidle", timeout=60000)
-        page.wait_for_timeout(2000)
-        log("Logged in. Calling listOffers API…")
 
-        resp = context.request.get(API_URL, timeout=30000)
-        if resp.status != 200:
-            raise RuntimeError(f"API returned HTTP {resp.status}: {resp.text()[:300]}")
-        data = resp.json()
-        browser.close()
-
+def get_offers(context) -> tuple[list[dict], dict]:
+    resp = context.request.get(API_URL, timeout=30000)
+    if resp.status != 200:
+        raise RuntimeError(f"API returned HTTP {resp.status}: {resp.text()[:300]}")
+    data = resp.json()
     offers = data.get("offers", []) if isinstance(data, dict) else []
     if not isinstance(offers, list):
         offers = []
     return offers, data
+
+
+def reserve_offer(context, offer) -> str:
+    """Place a 24h hold on an offer via the buyOffer endpoint.
+
+    WARNING: the exact request shape has NOT been confirmed against a real offer
+    yet. This best-effort guess is only ever invoked in RESERVE_MODE=live, which
+    must stay disabled until we observe one real reservation — to lock in the call
+    AND confirm it merely holds the slot (no charge). The full response is returned
+    so the real shape can be finalized.
+    """
+    oid = offer.get("_id") or offer.get("id")
+    resp = context.request.post(
+        BUY_URL,
+        data=json.dumps({"offerId": oid}),
+        headers={"content-type": "application/json"},
+        timeout=30000,
+    )
+    return f"HTTP {resp.status}: {resp.text()[:300]}"
+
+
+def maybe_reserve(context, new_ids, current) -> list[str]:
+    """Auto-reserve qualifying new offers per RESERVE_MODE. Returns human notes."""
+    if RESERVE_MODE not in ("dryrun", "live"):
+        return []
+    notes = []
+    for i in new_ids:
+        o = current[i]
+        price = o.get("buyerTotal") or o.get("askPrice") or 0
+        if RESERVE_MAX_PRICE and price and price > RESERVE_MAX_PRICE:
+            log(f"Offer {i}: price {price} > limit {RESERVE_MAX_PRICE}; not reserving.")
+            notes.append(f"  • {offer_label(o)} → NEzarezervováno (nad limit {RESERVE_MAX_PRICE} Kč)")
+            continue
+        if RESERVE_MODE == "dryrun":
+            log(f"[DRYRUN] would reserve offer {i} (buyerTotal={price}).")
+            notes.append(f"  • {offer_label(o)} → NANEČISTO (rezervace by proběhla)")
+        else:  # live
+            try:
+                res = reserve_offer(context, o)
+                log(f"[LIVE] reserve {i}: {res}")
+                notes.append(f"  • {offer_label(o)} → {res}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[LIVE] reserve error {i}: {e}")
+                notes.append(f"  • {offer_label(o)} → CHYBA rezervace: {e}")
+    return notes
 
 
 # ---------------------------------------------------------------------------
@@ -194,44 +255,60 @@ def run() -> int:
         )
         return 0
 
-    offers, raw = fetch_offers()
-    log(f"API returned {len(offers)} offer(s).")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            do_login(page)
+            offers, raw = get_offers(context)
+            log(f"API returned {len(offers)} offer(s).")
 
-    if MODE == "discovery":
-        DEBUG_DIR.mkdir(exist_ok=True)
-        (DEBUG_DIR / "listOffers.json").write_text(
-            json.dumps(raw, ensure_ascii=False, indent=2)
-        )
-        log(f"Discovery: raw API response saved to ./{DEBUG_DIR}/listOffers.json")
-        return 0
+            if MODE == "discovery":
+                DEBUG_DIR.mkdir(exist_ok=True)
+                (DEBUG_DIR / "listOffers.json").write_text(
+                    json.dumps(raw, ensure_ascii=False, indent=2)
+                )
+                log(f"Discovery: raw API response saved to ./{DEBUG_DIR}/listOffers.json")
+                return 0
 
-    current = {offer_id(o): o for o in offers}
-    current_ids = set(current)
-    seen = load_state()
+            current = {offer_id(o): o for o in offers}
+            current_ids = set(current)
+            seen = load_state()
 
-    if seen is None:
-        # Truly the first run (no state file yet): record a silent baseline so we
-        # don't e-mail about offers that already exist. An EMPTY saved state is
-        # different — it means the last poll had zero offers, and a newly appearing
-        # offer must trigger an alert.
-        save_state(current_ids)
-        log(f"First run — baseline saved ({len(current_ids)} offer(s)), no alert sent.")
-        return 0
+            if seen is None:
+                # Truly the first run (no state file yet): silent baseline so we
+                # don't e-mail about offers that already exist. An EMPTY saved
+                # state is different — last poll had zero offers, so a newly
+                # appearing offer must trigger an alert.
+                save_state(current_ids)
+                log(f"First run — baseline saved ({len(current_ids)} offer(s)), no alert sent.")
+                return 0
 
-    new_ids = current_ids - seen
-    if new_ids:
-        lines = "\n".join(f"  • {offer_label(current[i])}" for i in new_ids)
-        body = (
-            f"Na tržišti přibylo nové startovné ({len(new_ids)}):\n\n{lines}\n\n"
-            f"Otevři: {MARKETPLACE_URL}"
-        )
-        send_email(f"🏁 Nové startovné ({len(new_ids)}) — B7 ID", body)
-    else:
-        log("No new offers.")
+            new_ids = current_ids - seen
+            if not new_ids:
+                log("No new offers.")
+                save_state(current_ids)
+                return 0
 
-    # Keep current offers as the new baseline (so disappeared+reappeared = new).
-    save_state(current_ids)
-    return 0
+            reserve_notes = maybe_reserve(context, new_ids, current)
+
+            lines = "\n".join(f"  • {offer_label(current[i])}" for i in new_ids)
+            body = f"Na tržišti přibylo nové startovné ({len(new_ids)}):\n\n{lines}\n\n"
+            if reserve_notes:
+                mode_label = {
+                    "dryrun": "NANEČISTO – nic se reálně nerezervovalo",
+                    "live": "OSTRÁ rezervace",
+                }.get(RESERVE_MODE, RESERVE_MODE)
+                body += f"Automatická rezervace [{mode_label}]:\n" + "\n".join(reserve_notes) + "\n\n"
+            body += f"Otevři: {MARKETPLACE_URL}"
+            send_email(f"🏁 Nové startovné ({len(new_ids)}) — B7 ID", body)
+
+            # Keep current offers as the new baseline (disappeared+reappeared = new).
+            save_state(current_ids)
+            return 0
+        finally:
+            browser.close()
 
 
 if __name__ == "__main__":
