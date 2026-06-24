@@ -23,14 +23,14 @@ Secrets (password, e-mail login) come from the environment — never hard-coded.
 Locally from a .env file; in GitHub Actions from repository Secrets.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import smtplib
 import sys
 from email.message import EmailMessage
 from pathlib import Path
-
-from playwright.sync_api import sync_playwright
 
 # ---------------------------------------------------------------------------
 # Configuration (from environment)
@@ -254,6 +254,8 @@ def run() -> int:
             f"Sleduji: {MARKETPLACE_URL}",
         )
         return 0
+
+    from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
