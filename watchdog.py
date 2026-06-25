@@ -168,7 +168,14 @@ def offer_label(offer: dict) -> str:
 # ---------------------------------------------------------------------------
 # Browser session helpers
 # ---------------------------------------------------------------------------
-def do_login(page) -> None:
+def do_login(page) -> str | None:
+    """Log in via the form and capture the access token from the user/login
+    response. The frontend keeps this token only in JS memory (never in
+    localStorage) and sends it as `Authorization: Bearer <token>` on
+    state-changing calls like buyOffer — without it those calls 401 with
+    "User is not authenticated." / "Header 'authorization' was not found."
+    (observed in production on 2026-06-24). The CSRF header alone is not enough.
+    """
     log(f"Opening login page: {LOGIN_URL}")
     page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
     email_field = page.locator(SEL_EMAIL) if SEL_EMAIL else page.get_by_label(LABEL_EMAIL)
@@ -180,10 +187,23 @@ def do_login(page) -> None:
     )
     email_field.fill(B7_EMAIL, timeout=15000)
     pw_field.fill(B7_PASSWORD, timeout=15000)
-    submit.click(timeout=15000)
+    with page.expect_response(
+        lambda r: "user/login" in r.url and r.request.method == "POST", timeout=15000
+    ) as login_resp_info:
+        submit.click(timeout=15000)
     page.wait_for_load_state("networkidle", timeout=60000)
     page.wait_for_timeout(2000)
     log("Logged in.")
+
+    token = None
+    try:
+        body = login_resp_info.value.json()
+        token = body.get("token") or (body.get("data") or {}).get("token")
+    except Exception as e:  # noqa: BLE001
+        log(f"Could not extract access token from login response: {e}")
+    if not token:
+        log("WARNING: no access token captured — live reserve calls will likely 401.")
+    return token
 
 
 def get_offers(context) -> tuple[list[dict], dict]:
@@ -197,19 +217,24 @@ def get_offers(context) -> tuple[list[dict], dict]:
     return offers, data
 
 
-def reserve_offer(context, offer, csrf_token) -> tuple[bool, str]:
+def reserve_offer(context, offer, csrf_token, auth_token) -> tuple[bool, str]:
     """Place a 24h hold on an offer via buyOffer.
 
-    Mirrors the b7id frontend exactly: POST market/buyOffer with body {"_id": id}
-    and the CSRF header (X-Csrf-Token) read from the logged-in session. A
-    successful response carries `gwUrl` — the payment-gateway link. We do NOT
-    follow it: buyOffer only reserves/holds the slot for 24 h; paying is a separate
-    step the user does manually. Returns (success, human message incl. pay link).
+    Mirrors the b7id frontend exactly: POST market/buyOffer with body {"_id": id},
+    the CSRF header (X-Csrf-Token), AND an Authorization: Bearer <access token>
+    header — the backend rejects the call with 401 "User is not authenticated."
+    if that last one is missing (observed in production on 2026-06-24); the CSRF
+    header alone is not sufficient. A successful response carries `gwUrl` — the
+    payment-gateway link. We do NOT follow it: buyOffer only reserves/holds the
+    slot for 24 h; paying is a separate step the user does manually. Returns
+    (success, human message incl. pay link).
     """
     oid = offer.get("_id") or offer.get("id")
     headers = {"content-type": "application/json"}
     if csrf_token:
         headers["X-Csrf-Token"] = csrf_token
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
     resp = context.request.post(
         BUY_URL, data=json.dumps({"_id": oid}), headers=headers, timeout=30000
     )
@@ -224,7 +249,7 @@ def reserve_offer(context, offer, csrf_token) -> tuple[bool, str]:
     return False, f"NEúspěch (HTTP {resp.status}): {resp.text()[:300]}"
 
 
-def maybe_reserve(context, new_ids, current, csrf_token) -> list[str]:
+def maybe_reserve(context, new_ids, current, csrf_token, auth_token) -> list[str]:
     """Auto-reserve qualifying new offers per RESERVE_MODE. Returns human notes."""
     if RESERVE_MODE not in ("dryrun", "live"):
         return []
@@ -241,7 +266,7 @@ def maybe_reserve(context, new_ids, current, csrf_token) -> list[str]:
             notes.append(f"  • {offer_label(o)} → NANEČISTO (rezervace by proběhla)")
         else:  # live
             try:
-                ok, res = reserve_offer(context, o, csrf_token)
+                ok, res = reserve_offer(context, o, csrf_token, auth_token)
                 log(f"[LIVE] reserve {i}: {'OK' if ok else 'FAIL'} {res}")
                 notes.append(f"  • {offer_label(o)} → {res}")
             except Exception as e:  # noqa: BLE001
@@ -270,8 +295,8 @@ def run() -> int:
         context = browser.new_context()
         page = context.new_page()
         try:
-            do_login(page)
-            # CSRF token (needed to authorize state-changing POSTs like buyOffer).
+            auth_token = do_login(page)
+            # CSRF token (also required to authorize state-changing POSTs like buyOffer).
             csrf_token = page.evaluate(
                 "() => localStorage.getItem('session_csrf_token')"
             )
@@ -305,7 +330,7 @@ def run() -> int:
                 save_state(current_ids)
                 return 0
 
-            reserve_notes = maybe_reserve(context, new_ids, current, csrf_token)
+            reserve_notes = maybe_reserve(context, new_ids, current, csrf_token, auth_token)
 
             lines = "\n".join(f"  • {offer_label(current[i])}" for i in new_ids)
             body = f"Na tržišti přibylo nové startovné ({len(new_ids)}):\n\n{lines}\n\n"
